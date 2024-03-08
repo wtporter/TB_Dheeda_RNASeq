@@ -1,0 +1,191 @@
+---
+title: "Megans Deeda RNASeq DESeq Analysis"
+author: "Tanner Porter"
+date: "2023-12-07"
+output:
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+
+
+```{r setup, include=FALSE}
+#loadpackages
+library(tidyverse)
+library(DESeq2)
+```
+
+# Basic Manipulation of the Data
+Import the count table (sequencing data), metadata, pair them and create a DESeq object.
+
+```{r Data Import}
+
+#Read in the sequencing data...
+TB_RNA <- as.matrix(read.csv("/scratch/mfolkerts/Deeda_RNA_Seq/Latest_data/countTable_dedup_nocontrols.txt", sep="\t", row.names = "Geneid"))
+
+#Read in the metadata file.
+Metadata <- readxl::read_xlsx("/scratch/tporter/TB_20231117_Megans_DESeq/TGEN CASS Shipment 1 Metadata_07-02-2024.xlsx")
+
+Metadata_2 <- read_csv("/scratch/mfolkerts/Deeda_RNA_Seq/Latest_data/metadata_RNASeq_Deeda.csv")
+
+Metadata <- left_join(Metadata, Metadata_2)
+
+rm(Metadata_2)
+
+# row.names(Metadata) <- Metadata$`Participant ID` #Depreciated
+
+Metadata <- Metadata %>%
+  mutate(Participant_ID2 = `Participant ID`) %>%
+  column_to_rownames(var = "Participant_ID2")
+
+#Convert metadata to factors
+Metadata$Group <- factor(str_replace(Metadata$Grouping, " ", "_"), levels = c("CONTROL_2", "CONTROL_1", "CASES")) #Remove was from names
+
+Metadata$Run <- factor(Metadata$Run)
+
+Metadata$Gender <- factor(Metadata$Gender)
+
+Metadata$HIV_Status <- factor(Metadata$`HIV Status`)
+
+Metadata$CASS_Smear <- factor(Metadata$`CASS Smear`)
+
+Metadata$CASS_Culture <- factor(Metadata$`CASS Culture`)
+
+Metadata$Simple_Group <- ifelse(grepl("CASES",Metadata$Group), "CASES", "CONTROL")
+
+#Convert metadata to factors
+Metadata$Simple_Group <- factor(Metadata$Simple_Group, levels = c("CONTROL", "CASES")) #Remove was from names
+
+Metadata$Simple_Group
+
+
+########
+########
+# Removes 1 sample that was not sequenced.
+########
+########
+Metadata <- Metadata %>%
+  filter(row.names(Metadata) %in% colnames(TB_RNA))
+########
+########
+
+
+#See if there are issues between the dataset.
+rownames(Metadata) %in% colnames(TB_RNA)
+#reorder the columns in metatdata and sampledata so that they are in the same order for DeSeq2
+TB_RNA <- TB_RNA[, rownames(Metadata)]
+#check if it worked
+all(rownames(Metadata) == colnames(TB_RNA))
+
+
+##### Since there is a bunch of metadata missing...
+Metadata_CASS_SMEAR <- Metadata %>%
+  filter(!is.na(`CASS Smear`))
+
+
+
+TB_RNA_CASS_SMEAR <- TB_RNA[,(colnames(TB_RNA) %in% rownames(Metadata_CASS_SMEAR)), drop = F]
+#check if it worked
+all(rownames(Metadata_CASS_SMEAR) == colnames(TB_RNA_CASS_SMEAR)) 
+
+
+
+
+```
+# Join with annotations file
+```{r}
+genes.anno <- fst::read_fst("/scratch/tporter/TB_20231117_Megans_DESeq/GRCh38_GENCODE40LNCipedia_geneAnnotations.fst") %>%
+  dplyr::select(gene_id, gene_type, gene_name, biotype_class) %>%
+  unique()
+
+```
+
+# General Data Exploration and Visualization
+```{r}
+Metadata <- Metadata %>%
+  mutate(Name = row.names(Metadata))
+
+Metadata %>%  
+  ggplot(aes(y = Read_count, x = Name, fill = Group)) +
+    geom_bar(stat = "identity")+
+    theme_bw()+
+    scale_y_log10()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+    ggsci::scale_fill_npg() +
+    ggtitle("Reads across samples and groups")
+
+Metadata %>%  
+  ggplot(aes(y = Read_count, x = Group, fill = Group)) +
+    geom_boxplot()+
+    theme_bw()+
+    scale_y_log10()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+    ggsci::scale_fill_npg()+
+    ggtitle("Reads across samples and groups")
+
+
+Metadata <- full_join(Metadata, data_frame(Name = colnames(TB_RNA),
+                   N_genes = TB_RNA %>%colSums()))
+
+TB_RNA_DF <- as_data_frame(TB_RNA)
+
+TB_RNA_DF$Gene <- row.names(TB_RNA)
+
+TB_RNA_DF <- TB_RNA_DF %>%
+  pivot_longer(!Gene, values_to = "Reads", names_to = "Name")
+
+TB_RNA_DF <- left_join(TB_RNA_DF, Metadata)
+
+TB_RNA_DF %>%
+  filter(Reads > 0) %>%
+  group_by(Name, Group) %>%
+  tally(name = "N_Genes_0") %>%
+  ggplot(aes(x = Name, y = N_Genes_0, fill = Group))+
+    geom_bar(stat = "identity")+
+    theme_bw()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+    ggsci::scale_fill_npg()+
+    ggtitle("n genes with reads across groups")
+
+TB_RNA_DF %>%
+  filter(Reads > 0) %>%
+  group_by(Name, Group) %>%
+  tally(name = "N_Genes_0") %>%
+  ggplot(aes(x = Group, y = N_Genes_0, fill = Group))+
+    geom_boxplot()+
+    theme_bw()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+    ggsci::scale_fill_npg()+
+    ylab("n Genes Identified (reads > 0)")
+
+TB_RNA_DF %>%
+  filter(Reads > 0) %>%
+  group_by(Name, Group, Read_count) %>%
+  tally(name = "N_Genes_0") %>%
+  ggplot(aes(x = Read_count, y = N_Genes_0, col = Group))+
+    geom_point()+
+    theme_bw()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+    ggsci::scale_color_npg()+
+    scale_x_log10() +
+    ggtitle("n genes with reads vs read count across groups")
+
+TB_RNA_DF %>%
+  filter(Reads > 0) %>%
+  group_by(Name) %>%
+  tally(name = "N_Genes_0") %>%
+  summarise(median = median(N_Genes_0, col = Group))
+
+Metadata <- left_join(Metadata,
+          TB_RNA_DF %>%
+            filter(Reads > 0) %>%
+            group_by(Name) %>%
+            tally(name = "N_Genes_0")) %>%
+            mutate(Gene_Count_Group = ifelse(N_Genes_0 > 25730, "High", "Low"))
+
+Metadata$CASS_outcome <- factor(Metadata$`CASS outcome`, levels = c("Negative", "Positive")) #Remove was from names
+
+Metadata$Smear_Group <- factor(Metadata$Smear, levels = c("Negative", "Positive")) #Remove was from names
+```
