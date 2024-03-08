@@ -1,5 +1,5 @@
 ---
-title: "Deeda RNASeq DESeq Analysis- All Transcripts No Filtering"
+title: "Deeda RNASeq DESeq Analysis- Coding Transcripts No Filtering"
 author: "Tanner Porter"
 date: "March 2024"
 output:
@@ -17,8 +17,8 @@ library(tidyverse)
 library(DESeq2)
 
 ##### Save Path For Data
-save_path <- "/scratch/tporter/TB_20231117_Megans_DESeq/Data_All_Transcripts_No_Filter/"
-prefix <- "All_Transcripts_No_Filter_"
+save_path <- "/scratch/tporter/TB_20231117_Megans_DESeq/Data_Coding_Transcripts_No_Filter/"
+prefix <- "Coding_Transcripts_No_Filter_"
 dir.create(save_path)
 ```
 
@@ -78,20 +78,46 @@ all(rownames(Metadata) == colnames(TB_RNA))
 Metadata_CASS_SMEAR <- Metadata %>%
   filter(!is.na(`CASS Smear`))
 
-
-
 TB_RNA_CASS_SMEAR <- TB_RNA[,(colnames(TB_RNA) %in% rownames(Metadata_CASS_SMEAR)), drop = F]
 #check if it worked
 all(rownames(Metadata_CASS_SMEAR) == colnames(TB_RNA_CASS_SMEAR)) 
 
 ```
 
+
 # Join with annotations file
 ```{r}
 genes.anno <- fst::read_fst("/scratch/tporter/TB_20231117_Megans_DESeq/GRCh38_GENCODE40LNCipedia_geneAnnotations.fst") %>%
   dplyr::select(gene_id, gene_type, gene_name, biotype_class) %>%
   unique()
+```
 
+
+# Coding Gene Filtering
+We are going to filter all genes that have less than 10 reads in at least 10 samples.
+```{r}
+genes.anno %>%
+  group_by(gene_type) %>%
+  tally() %>%
+  arrange(desc(n))
+
+protein_coding <- genes.anno %>%
+  filter(gene_type == "protein_coding")
+
+protein_coding <- protein_coding$gene_id
+
+TB_RNA <- TB_RNA[row.names(TB_RNA) %in% protein_coding, ]
+
+##### Since there is a bunch of metadata missing...
+Metadata_CASS_SMEAR <- Metadata %>%
+  filter(!is.na(`CASS Smear`))
+
+TB_RNA_CASS_SMEAR <- TB_RNA[,(colnames(TB_RNA) %in% rownames(Metadata_CASS_SMEAR)), drop = F]
+#check if it worked
+all(rownames(Metadata_CASS_SMEAR) == colnames(TB_RNA_CASS_SMEAR)) 
+```
+
+```{r}
 Metadata <- Metadata %>%
   mutate(Name = row.names(Metadata))
 

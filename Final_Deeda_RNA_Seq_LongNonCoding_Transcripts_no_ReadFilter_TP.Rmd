@@ -1,5 +1,5 @@
 ---
-title: "Deeda RNASeq DESeq Analysis- All Transcripts No Filtering"
+title: "Deeda RNASeq DESeq Analysis- Long Non-Coding Transcripts No Filtering"
 author: "Tanner Porter"
 date: "March 2024"
 output:
@@ -17,8 +17,8 @@ library(tidyverse)
 library(DESeq2)
 
 ##### Save Path For Data
-save_path <- "/scratch/tporter/TB_20231117_Megans_DESeq/Data_All_Transcripts_No_Filter/"
-prefix <- "All_Transcripts_No_Filter_"
+save_path <- "/scratch/tporter/TB_20231117_Megans_DESeq/Data_LongNonCoding_Transcripts_No_Filter/"
+prefix <- "Long_Non_Coding_Transcripts_No_Filter_"
 dir.create(save_path)
 ```
 
@@ -78,20 +78,46 @@ all(rownames(Metadata) == colnames(TB_RNA))
 Metadata_CASS_SMEAR <- Metadata %>%
   filter(!is.na(`CASS Smear`))
 
-
-
 TB_RNA_CASS_SMEAR <- TB_RNA[,(colnames(TB_RNA) %in% rownames(Metadata_CASS_SMEAR)), drop = F]
 #check if it worked
 all(rownames(Metadata_CASS_SMEAR) == colnames(TB_RNA_CASS_SMEAR)) 
 
 ```
 
+
 # Join with annotations file
 ```{r}
 genes.anno <- fst::read_fst("/scratch/tporter/TB_20231117_Megans_DESeq/GRCh38_GENCODE40LNCipedia_geneAnnotations.fst") %>%
   dplyr::select(gene_id, gene_type, gene_name, biotype_class) %>%
   unique()
+```
 
+
+# Coding Gene Filtering
+We are going to filter all genes that have less than 10 reads in at least 10 samples.
+```{r}
+genes.anno %>%
+  group_by(gene_type) %>%
+  tally() %>%
+  arrange(desc(n))
+
+lnc_coding <- genes.anno %>%
+  filter(gene_type == "lncipedia_lncRNA")
+
+lnc_coding <- lnc_coding$gene_id
+
+TB_RNA <- TB_RNA[row.names(TB_RNA) %in% lnc_coding,]
+
+##### Since there is a bunch of metadata missing...
+Metadata_CASS_SMEAR <- Metadata %>%
+  filter(!is.na(`CASS Smear`))
+
+TB_RNA_CASS_SMEAR <- TB_RNA[,(colnames(TB_RNA) %in% rownames(Metadata_CASS_SMEAR)), drop = F]
+#check if it worked
+all(rownames(Metadata_CASS_SMEAR) == colnames(TB_RNA_CASS_SMEAR)) 
+```
+
+```{r}
 Metadata <- Metadata %>%
   mutate(Name = row.names(Metadata))
 
@@ -430,24 +456,24 @@ plotPCA(ntd, intgroup=c("Group"))
 ```
 
 ```{r}
-Plotly <- Out %>%
-  filter(gene_type == "protein_coding") %>%
-  mutate(Contrast_Group = ifelse(grepl("HIV", Contrast), "HIV",
-                                 ifelse(grepl("Gender", Contrast), "Gender",
-                                        ifelse(grepl("Run", Contrast), "Run", "Experimental")))) %>%
-  ggplot(aes(x = gene_name, y = Contrast, fill = log2FoldChange))+
-    geom_tile()+
-    theme_bw()+
-    facet_wrap(~Contrast_Group, scales = "free", ncol = 1)+
-    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
-    scale_fill_gradientn(colours = c("blue4", "green4", "orange", "red", "red", "red"))
-
-Plotly
-
-#plotly::ggplotly(Plotly)
-
-htmlwidgets::saveWidget(plotly::as_widget(plotly::ggplotly(Plotly, width = 10000, height = 2500)),
-                        file= paste0(save_path, prefix, "Contrast_Figure.html"), selfcontained = TRUE)
+# Plotly <- Out %>%
+#   filter(gene_type == "protein_coding") %>%
+#   mutate(Contrast_Group = ifelse(grepl("HIV", Contrast), "HIV",
+#                                  ifelse(grepl("Gender", Contrast), "Gender",
+#                                         ifelse(grepl("Run", Contrast), "Run", "Experimental")))) %>%
+#   ggplot(aes(x = gene_name, y = Contrast, fill = log2FoldChange))+
+#     geom_tile()+
+#     theme_bw()+
+#     #facet_wrap(~Contrast_Group, scales = "free", ncol = 1)+
+#     theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+#     scale_fill_gradientn(colours = c("blue4", "green4", "orange", "red", "red", "red"))
+# 
+# Plotly
+# 
+# #plotly::ggplotly(Plotly)
+# 
+# htmlwidgets::saveWidget(plotly::as_widget(plotly::ggplotly(Plotly, width = 10000, height = 2500)),
+#                         file= paste0(save_path, prefix, "Contrast_Figure.html"), selfcontained = TRUE)
 ```
 
 # General PCA on all genes

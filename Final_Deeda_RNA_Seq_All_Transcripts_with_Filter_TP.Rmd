@@ -1,5 +1,5 @@
 ---
-title: "Deeda RNASeq DESeq Analysis- All Transcripts No Filtering"
+title: "Deeda RNASeq DESeq Analysis- All Transcripts With Filtering"
 author: "Tanner Porter"
 date: "March 2024"
 output:
@@ -17,8 +17,8 @@ library(tidyverse)
 library(DESeq2)
 
 ##### Save Path For Data
-save_path <- "/scratch/tporter/TB_20231117_Megans_DESeq/Data_All_Transcripts_No_Filter/"
-prefix <- "All_Transcripts_No_Filter_"
+save_path <- "/scratch/tporter/TB_20231117_Megans_DESeq/Data_All_Transcripts_Filter_10Reads_10Samples/"
+prefix <- "All_Transcripts_With_Filter_"
 dir.create(save_path)
 ```
 
@@ -78,7 +78,26 @@ all(rownames(Metadata) == colnames(TB_RNA))
 Metadata_CASS_SMEAR <- Metadata %>%
   filter(!is.na(`CASS Smear`))
 
+TB_RNA_CASS_SMEAR <- TB_RNA[,(colnames(TB_RNA) %in% rownames(Metadata_CASS_SMEAR)), drop = F]
+#check if it worked
+all(rownames(Metadata_CASS_SMEAR) == colnames(TB_RNA_CASS_SMEAR)) 
 
+```
+
+# Gene Filtering
+We are going to filter all genes that have less than 10 reads in at least 10 samples.
+```{r}
+Metadata %>%
+  group_by(Group) %>%
+  tally()
+#Smallest group is 20, to be conservative lets require 10
+binary_matrix <- ifelse(TB_RNA >= 10, 1, 0)
+row_sums <- rowSums(binary_matrix)
+TB_RNA <- TB_RNA[row_sums >= 10,]
+
+##### Since there is a bunch of metadata missing...
+Metadata_CASS_SMEAR <- Metadata %>%
+  filter(!is.na(`CASS Smear`))
 
 TB_RNA_CASS_SMEAR <- TB_RNA[,(colnames(TB_RNA) %in% rownames(Metadata_CASS_SMEAR)), drop = F]
 #check if it worked
