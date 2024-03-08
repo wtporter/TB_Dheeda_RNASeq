@@ -1,0 +1,154 @@
+---
+title: "Deeda_RNA_seq"
+author: "Megan Folkerts"
+date: "2023-11-14"
+output: html_document
+---
+
+
+
+```{r setup, include=FALSE}
+#loadpackages
+library(tidyverse)
+library(DESeq2)
+```
+
+
+```{r setup, include=FALSE}
+#read in my actual sample data. First object is the counts, second is metadata. Code also converts metadata to a factor
+testset <- as.matrix(read.csv("/scratch/mfolkerts/Deeda_RNA_Seq/countTable_dedup.txt", sep="\t", row.names = "Geneid"))
+samplecoldata <- read.csv("/scratch/mfolkerts/Deeda_RNA_Seq/metadata_RNASeq_Deeda_controlscombined_halfsamples.csv", row.names=1)
+samplecoldata$Group <- factor(samplecoldata$Group)
+```
+
+
+```{r setup, include=FALSE}
+#reorder the columns in metatdata and sampledata so that they are in the same order for DeSeq2
+testset <- testset[, rownames(samplecoldata)]
+#check if it worked
+all(rownames(samplecoldata) == colnames(testset))
+```
+
+
+
+```{r}
+#This is to run DeSeq itself, part1
+DeedaRNASeq <- DESeqDataSetFromMatrix(countData = testset,
+                              colData = samplecoldata,
+                              design = ~ Group)
+
+```
+
+
+```{r}
+#extract results from DeSeq object, run the full DeSeq command, print to screen, then get data into deliverable format
+DeedaRNASeq2 <- DESeq(DeedaRNASeq)
+ResultsDeeda2 <- results(DeedaRNASeq2)
+ResultsDeeda2
+AllResults2 <- data.frame(ResultsDeeda2)
+#Get just the significant fold changes THIS IS A FUNCTION IN DESEQ! DONT NEED THIS
+#SignificantResults <- AllResults[which(AllResults[,5]<=0.05),]
+```
+
+#This chunk of code needs troubleshooting. It is not working here, nor is it working in the example .rmd file, however the code
+#above can replace this if we need it to.
+
+****For this example, DESeq needs to be run first....
+Example from ?DESeq2::results()
+dds <- makeExampleDESeqDataSet(m=4)
+dds <- DESeq(dds)
+res <- results(dds, contrast=c("condition","B","A"))
+
+```{r}
+#Get alpha<0.05, get data into extractable format THIS CODE IS NOT WORKING!!!!!!!
+SignificantResults <- results(DESeq(DeedaRNASeq), alpha=0.05)
+
+sum(SignificantResults$padj < 0.05, na.rm=TRUE)
+
+outputSignificantReults <- data.frame(SignificantResults)
+
+#My addition
+outputSignificantReults_filter <- outputSignificantReults %>%
+  filter(padj <0.05)
+```
+
+#Sections of this need troubleshooting. See comments in code
+```{r}
+#Visualizations- general plot
+
+##Install package
+#BiocManager::install("apeglm")
+
+?apeglm::apeglm() #successful installation
+
+plotMA(ResultsDeeda, ylim=c(-2,2))
+#Log folds shrinkage followed by visualizations 
+resultsNames(DeedaRNASeq)
+
+ResultsNormDeeda <- lfcShrink(DESeq(DeedaRNASeq), coef=2, type="normal")
+ResultsNormDeeda
+
+#THIS CODE DOES NOT RUN. Seems to be a problem with the apeglm package, which I did install but there were multiple errors.
+ResultsDeedaLFC <- lfcShrink(DESeq(DeedaRNASeq), coef=2, type="apeglm")
+ResultsDeedaLFC
+#This is to plot ResultsDeedaLFC. This will not run until the code above is fixed
+plotMA(ResultsDeedaLFC, ylim=c(-2,2))
+```
+
+
+```{r}
+#This is to do a log transform. This needs to be done, but I can't figure out if it needs to happen before or after LFC shrinkage, or if we should skip LFC shrinkage.....code is running though.
+vsd <- vst(DeedaRNASeq, blind=FALSE)
+vsd
+```
+#This is also not running. Seems like a package issue again. 
+```{r}
+#This is to make a heatmap of samples to see how they naturally cluster based on gene expression data. Because the package is not installed, I'm not sure this code is correct, as I've had to change some of it to match my data.
+
+select <- order(rowMeans(counts(DESeq(DeedaRNASeq),normalized=TRUE)),
+                decreasing=TRUE)[1:20]
+
+
+df <- data.frame(colData(DeedaRNASeq))
+
+
+
+
+pheatmap(assay(vsd)[select,], cluster_rows=FALSE, show_rownames=FALSE, cluster_cols=FALSE, annotation_col=df)
+## the issue here is the ", annotation_col=df" was not calling the row names. You were selecting just the single column and not the row names which is needed to tie the fill to the sample.
+
+
+
+```
+
+
+#This code is running but I don't know how. I would have thought I would need to change $Group and $type to match my data, but I'm 
+#unable to look at vsd as it is a DeSeq object, so I don't know how this is working at all....
+
+sampleDists needed to be replaced with sampleDistsDeeda. I am guessing there was an issue with an object in your env.  
+```{r}
+#This is to generate sample distances
+sampleDistsDeeda <- dist(t(assay(vsd)))
+sampleDistsDeeda
+#This plots the sample distances as a heatmap
+library("RColorBrewer")
+sampleDistMatrix <- as.matrix(sampleDistsDeeda)
+#How do I figure out how to change the code below this line??? $Group and $type likely need to be changed...
+rownames(sampleDistMatrix) <- paste(vsd$Group, vsd$type, sep="-")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDistsDeeda,
+         clustering_distance_cols=sampleDistsDeeda,
+         col=colors)
+```
+
+```{r}
+#This is to make a PCA plot
+plotPCA(vsd, intgroup=c("Group"))
+```
+```{r}
+
+```
+
+

@@ -1,0 +1,1144 @@
+---
+title: "Megans Deeda RNASeq DESeq Analysis"
+author: "Tanner Porter"
+date: "2023-12-07"
+output:
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+
+
+```{r setup, include=FALSE}
+#loadpackages
+library(tidyverse)
+library(DESeq2)
+```
+
+# Basic Manipulation of the Data
+Import the count table (sequencing data), metadata, pair them and create a DESeq object.
+
+```{r Data Import}
+
+#Read in the sequencing data...
+TB_RNA <- as.matrix(read.csv("/scratch/mfolkerts/Deeda_RNA_Seq/Latest_data/countTable_dedup_nocontrols.txt", sep="\t", row.names = "Geneid"))
+
+#Read in the metadata file.
+Metadata <- readxl::read_xlsx("/scratch/tporter/TB_20231117_Megans_DESeq/TGEN CASS Shipment 1 Metadata_07-02-2024.xlsx")
+
+Metadata_2 <- read_csv("/scratch/mfolkerts/Deeda_RNA_Seq/Latest_data/metadata_RNASeq_Deeda.csv")
+
+Metadata <- left_join(Metadata, Metadata_2)
+
+rm(Metadata_2)
+
+# row.names(Metadata) <- Metadata$`Participant ID` #Depreciated
+
+Metadata <- Metadata %>%
+  mutate(Participant_ID2 = `Participant ID`) %>%
+  column_to_rownames(var = "Participant_ID2")
+
+#Convert metadata to factors
+Metadata$Group <- factor(str_replace(Metadata$Grouping, " ", "_"), levels = c("CONTROL_2", "CONTROL_1", "CASES")) #Remove was from names
+
+Metadata$Run <- factor(Metadata$Run)
+
+Metadata$Gender <- factor(Metadata$Gender)
+
+Metadata$HIV_Status <- factor(Metadata$`HIV Status`)
+
+Metadata$CASS_Smear <- factor(Metadata$`CASS Smear`)
+
+Metadata$CASS_Culture <- factor(Metadata$`CASS Culture`)
+
+Metadata$Simple_Group <- ifelse(grepl("CASES",Metadata$Group), "CASES", "CONTROL")
+
+#Convert metadata to factors
+Metadata$Simple_Group <- factor(Metadata$Simple_Group, levels = c("CONTROL", "CASES")) #Remove was from names
+
+Metadata$Simple_Group
+
+
+########
+########
+# Removes 1 sample that was not sequenced.
+########
+########
+Metadata <- Metadata %>%
+  filter(row.names(Metadata) %in% colnames(TB_RNA))
+########
+########
+
+
+#See if there are issues between the dataset.
+rownames(Metadata) %in% colnames(TB_RNA)
+#reorder the columns in metatdata and sampledata so that they are in the same order for DeSeq2
+TB_RNA <- TB_RNA[, rownames(Metadata)]
+#check if it worked
+all(rownames(Metadata) == colnames(TB_RNA))
+
+
+##### Since there is a bunch of metadata missing...
+Metadata_CASS_SMEAR <- Metadata %>%
+  filter(!is.na(`CASS Smear`))
+
+
+
+TB_RNA_CASS_SMEAR <- TB_RNA[,(colnames(TB_RNA) %in% rownames(Metadata_CASS_SMEAR)), drop = F]
+#check if it worked
+all(rownames(Metadata_CASS_SMEAR) == colnames(TB_RNA_CASS_SMEAR)) 
+
+
+
+
+```
+# Join with annotations file
+```{r}
+genes.anno <- fst::read_fst("/scratch/tporter/TB_20231117_Megans_DESeq/GRCh38_GENCODE40LNCipedia_geneAnnotations.fst") %>%
+  dplyr::select(gene_id, gene_type, gene_name, biotype_class) %>%
+  unique()
+
+```
+
+# General Data Exploration and Visualization
+```{r}
+Metadata <- Metadata %>%
+  mutate(Name = row.names(Metadata))
+
+Metadata %>%  
+  ggplot(aes(y = Read_count, x = Name, fill = Group)) +
+    geom_bar(stat = "identity")+
+    theme_bw()+
+    scale_y_log10()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+    ggsci::scale_fill_npg() +
+    ggtitle("Reads across samples and groups")
+
+Metadata %>%  
+  ggplot(aes(y = Read_count, x = Group, fill = Group)) +
+    geom_boxplot()+
+    theme_bw()+
+    scale_y_log10()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+    ggsci::scale_fill_npg()+
+    ggtitle("Reads across samples and groups")
+
+
+Metadata <- full_join(Metadata, data_frame(Name = colnames(TB_RNA),
+                   N_genes = TB_RNA %>%colSums()))
+
+TB_RNA_DF <- as_data_frame(TB_RNA)
+
+TB_RNA_DF$Gene <- row.names(TB_RNA)
+
+TB_RNA_DF <- TB_RNA_DF %>%
+  pivot_longer(!Gene, values_to = "Reads", names_to = "Name")
+
+TB_RNA_DF <- left_join(TB_RNA_DF, Metadata)
+
+TB_RNA_DF %>%
+  filter(Reads > 0) %>%
+  group_by(Name, Group) %>%
+  tally(name = "N_Genes_0") %>%
+  ggplot(aes(x = Name, y = N_Genes_0, fill = Group))+
+    geom_bar(stat = "identity")+
+    theme_bw()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+    ggsci::scale_fill_npg()+
+    ggtitle("n genes with reads across groups")
+
+TB_RNA_DF %>%
+  filter(Reads > 0) %>%
+  group_by(Name, Group) %>%
+  tally(name = "N_Genes_0") %>%
+  ggplot(aes(x = Group, y = N_Genes_0, fill = Group))+
+    geom_boxplot()+
+    theme_bw()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+    ggsci::scale_fill_npg()+
+    ylab("n Genes Identified (reads > 0)")
+
+TB_RNA_DF %>%
+  filter(Reads > 0) %>%
+  group_by(Name, Group, Read_count) %>%
+  tally(name = "N_Genes_0") %>%
+  ggplot(aes(x = Read_count, y = N_Genes_0, col = Group))+
+    geom_point()+
+    theme_bw()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+    ggsci::scale_color_npg()+
+    scale_x_log10() +
+    ggtitle("n genes with reads vs read count across groups")
+
+TB_RNA_DF %>%
+  filter(Reads > 0) %>%
+  group_by(Name) %>%
+  tally(name = "N_Genes_0") %>%
+  summarise(median = median(N_Genes_0, col = Group))
+
+Metadata <- left_join(Metadata,
+          TB_RNA_DF %>%
+            filter(Reads > 0) %>%
+            group_by(Name) %>%
+            tally(name = "N_Genes_0")) %>%
+            mutate(Gene_Count_Group = ifelse(N_Genes_0 > 25730, "High", "Low"))
+
+Metadata$CASS_outcome <- factor(Metadata$`CASS outcome`, levels = c("Negative", "Positive")) #Remove was from names
+
+Metadata$Smear_Group <- factor(Metadata$Smear, levels = c("Negative", "Positive")) #Remove was from names
+```
+
+
+
+# Conduct DESeq Analysis for Group
+```{r}
+#This creates a DESeq object
+DeedaRNASeq_Groups <- DESeqDataSetFromMatrix(countData = TB_RNA,
+                              colData = Metadata,
+                              design = ~ Group + Run + Gender + HIV_Status)
+
+DeedaRNASeq_Groups
+
+#Conduct RNASeq Analysis for full control
+DeedaRNASeq_Analysis_Groups <- DESeq(DeedaRNASeq_Groups, test="Wald")
+
+plotDispEsts(DeedaRNASeq_Analysis_Groups)
+
+resultsNames(DeedaRNASeq_Analysis_Groups)
+
+DeedaRNASeq_Analysis_Groups@design
+```
+
+# Conduct DESeq Analysis for CASS_outcome
+```{r}
+#This creates a DESeq object
+DeedaRNASeq_CASS_outcome <- DESeqDataSetFromMatrix(countData = TB_RNA,
+                              colData = Metadata,
+                              design = ~ CASS_outcome + Run + Gender + HIV_Status)
+
+DeedaRNASeq_CASS_outcome
+
+#Conduct RNASeq Analysis for full control
+DeedaRNASeq_Analysis_CASS_outcome <- DESeq(DeedaRNASeq_CASS_outcome, test="Wald")
+
+plotDispEsts(DeedaRNASeq_Analysis_CASS_outcome)
+  
+resultsNames(DeedaRNASeq_Analysis_CASS_outcome)
+
+DeedaRNASeq_Analysis_CASS_outcome@design
+```
+
+# Conduct DESeq Analysis for CAAS Smear
+```{r}
+#This creates a DESeq object
+DeedaRNASeq_Smear <- DESeqDataSetFromMatrix(countData = TB_RNA_CASS_SMEAR,
+                              colData = Metadata_CASS_SMEAR,
+                              design = ~ CASS_Smear + Run + Gender + HIV_Status)
+
+DeedaRNASeq_Smear
+
+#Conduct RNASeq Analysis for full control
+DeedaRNASeq_Analysis_Smear <- DESeq(DeedaRNASeq_Smear, test="Wald")
+
+plotDispEsts(DeedaRNASeq_Analysis_Smear)
+  
+resultsNames(DeedaRNASeq_Analysis_Smear)
+
+DeedaRNASeq_Analysis_Smear@design
+```
+
+# Conduct DESeq Analysis for CASS Smear
+```{r}
+#This creates a DESeq object
+DeedaRNASeq_Culture <- DESeqDataSetFromMatrix(countData = TB_RNA_CASS_SMEAR,
+                              colData = Metadata_CASS_SMEAR,
+                              design = ~ CASS_Culture + Run + Gender + HIV_Status)
+
+DeedaRNASeq_Culture
+
+#Conduct RNASeq Analysis for full control
+DeedaRNASeq_Analysis_Culture <- DESeq(DeedaRNASeq_Culture, test="Wald")
+
+plotDispEsts(DeedaRNASeq_Analysis_Culture)
+  
+resultsNames(DeedaRNASeq_Analysis_Culture)
+
+DeedaRNASeq_Analysis_Culture@design
+```
+
+# Contrast Analysis
+```{r}
+
+### Group Contrast Analysis
+Contrast_Groups_CONTROL1_CASES <- data.frame(results(DeedaRNASeq_Analysis_Groups, contrast=c("Group","CONTROL_1","CASES"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "Group- Control_1 vs. Cases")%>%
+  mutate(gene_id = row.names(.))
+
+Contrast_Groups_CONTROL2_CASES <- data.frame(results(DeedaRNASeq_Analysis_Groups, contrast=c("Group","CONTROL_2","CASES"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "Group- Control_2 vs. Cases")%>%
+  mutate(gene_id = row.names(.))
+
+Contrast_Groups_CONTROL2_CONTROL1 <- data.frame(results(DeedaRNASeq_Analysis_Groups, contrast=c("Group","CONTROL_2","CONTROL_1"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "Group- Control_2 vs. Control_1")%>%
+  mutate(gene_id = row.names(.))
+
+Contrast_Groups_Run<- data.frame(results(DeedaRNASeq_Analysis_Groups, contrast=c("Run","1", "2"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "Group- Run 1 vs. 2") %>%
+  mutate(gene_id = row.names(.))
+
+Contrast_Groups_Gender<- data.frame(results(DeedaRNASeq_Analysis_Groups, contrast=c("Gender","Male", "Female"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "Group- Gender Male vs. Female") %>%
+  mutate(gene_id = row.names(.))
+
+Contrast_Groups_HIV<- data.frame(results(DeedaRNASeq_Analysis_Groups, contrast=c("HIV_Status","Positive", "Negative"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "Group- HIV Positive vs. Negative") %>%
+  mutate(gene_id = row.names(.))
+
+### CASS_outcome Contrast Analysis
+
+DeedaRNASeq_Analysis_CASS_outcome@design
+
+Contrast_CASS_outcome <- data.frame(results(DeedaRNASeq_Analysis_CASS_outcome, contrast=c("CASS_outcome","Negative", "Positive"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "CASS Outcome- Negative vs. Positive") %>%
+  mutate(gene_id = row.names(.))
+
+Contrast_CASS_Run<- data.frame(results(DeedaRNASeq_Analysis_CASS_outcome, contrast=c("Run","1", "2"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "CASS Outcome- Run 1 vs. 2") %>%
+  mutate(gene_id = row.names(.))
+
+Contrast_CASS_Gender<- data.frame(results(DeedaRNASeq_Analysis_CASS_outcome, contrast=c("Gender","Male", "Female"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "CASS Outcome- Gender Male vs. Female") %>%
+  mutate(gene_id = row.names(.))
+
+Contrast_CASS_HIV<- data.frame(results(DeedaRNASeq_Analysis_CASS_outcome, contrast=c("HIV_Status","Positive", "Negative"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "CASS Outcome- HIV Positive vs. Negative") %>%
+  mutate(gene_id = row.names(.))
+
+DeedaRNASeq_Analysis_CASS_outcome@design
+
+### Smear_Group Contrast Analysis
+
+DeedaRNASeq_Analysis_Smear@design
+
+Contrast_Smear_outcome <- data.frame(results(DeedaRNASeq_Analysis_Smear, contrast=c("CASS_Smear","Negative", "Positive"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "CASS Smear- Negative vs. Positive") %>%
+  mutate(gene_id = row.names(.))
+
+Contrast_Smear_Run<- data.frame(results(DeedaRNASeq_Analysis_Smear, contrast=c("Run","1", "2"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "CASS Smear- Run 1 vs. 2") %>%
+  mutate(gene_id = row.names(.))
+
+Contrast_Smear_Gender<- data.frame(results(DeedaRNASeq_Analysis_Smear, contrast=c("Gender","Male", "Female"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "CASS Smear- Gender Male vs. Female") %>%
+  mutate(gene_id = row.names(.))
+
+Contrast_Smear_HIV<- data.frame(results(DeedaRNASeq_Analysis_Smear, contrast=c("HIV_Status","Positive", "Negative"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "CASS Smear- HIV Positive vs. Negative") %>%
+  mutate(gene_id = row.names(.))
+
+### CASS CultureGroup Contrast Analysis
+
+DeedaRNASeq_Analysis_Culture@design
+
+Contrast_Culture_outcome <- data.frame(results(DeedaRNASeq_Analysis_Culture, contrast=c("CASS_Culture","Negative", "Positive"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "CASS Culture- Negative vs. Positive") %>%
+  mutate(gene_id = row.names(.))
+
+Contrast_Culture_Run<- data.frame(results(DeedaRNASeq_Analysis_Culture, contrast=c("Run","1", "2"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "CASS Culture- Run 1 vs. 2") %>%
+  mutate(gene_id = row.names(.))
+
+Contrast_Culture_Gender<- data.frame(results(DeedaRNASeq_Analysis_Culture, contrast=c("Gender","Male", "Female"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "CASS Culture- Gender Male vs. Female") %>%
+  mutate(gene_id = row.names(.))
+
+Contrast_Culture_HIV<- data.frame(results(DeedaRNASeq_Analysis_Culture, contrast=c("HIV_Status","Positive", "Negative"), alpha=0.05)) %>%
+  filter(padj < 0.05) %>%
+  mutate(Contrast = "CASS Culture- HIV Positive vs. Negative") %>%
+  mutate(gene_id = row.names(.))
+```
+
+# Results Combining
+
+```{r}
+# List all objects in the workspace
+all_objects <- ls()
+
+# Filter objects that begin with "Contrast_"
+contrast_objects <- grep("^Contrast_", all_objects, value = TRUE)
+
+contrast_objects
+
+# Check if there are any matching objects
+if (length(contrast_objects) > 0) {
+  # Combine (bind) the objects using do.call and rbind
+  Out <- do.call(rbind, lapply(contrast_objects, get))
+  
+  # Print or use the combined_contrasts object as needed
+  head(Out)
+} else {
+  print("No objects with the prefix 'Contrast_' found.")
+}
+
+head(Out)
+
+Out <- right_join(genes.anno, Out)
+
+```
+
+# BioMart
+```{r}
+require('biomaRt')
+
+mart <- useMart('ENSEMBL_MART_ENSEMBL')
+mart <- useDataset('hsapiens_gene_ensembl', mart)
+
+# annotLookup <- getBM(
+#   mart = mart,
+#   attributes = c(
+#     'ensembl_gene_id',
+#     'gene_biotype',
+#     'external_gene_name',
+#     'uniprot_gn_symbol',
+#     'uniprot_gn_id'),
+#   uniqueRows=TRUE)
+
+annotLookup <- getBM(
+  mart = mart,
+  attributes = c(
+    'ensembl_gene_id',
+    #'gene_biotype',
+    #'external_gene_name',
+    'uniprotswissprot'),
+  uniqueRows=TRUE)
+
+annotLookup <- annotLookup %>%
+  filter(!uniprotswissprot == "")
+
+Out$ensembl_gene_id_2 <- Out$gene_id
+
+Out <- Out %>%
+  separate(ensembl_gene_id_2, into = c("ensembl_gene_id", "dot"), sep = "\\.")
+
+Out_New <- left_join(Out, annotLookup, by = c("ensembl_gene_id"))
+
+#Out_New <- Out_New[,c(17, 1:16)]
+
+write.csv(Out_New, "/scratch/tporter/TB_20231117_Megans_DESeq/Deeda_RNA_Seq_Compiled_Contrast_Results_with_SWISSUNIPROT_Final.csv")
+
+# 1 duplicated uniprotswiss id which has 2 proteins
+Out_New %>%
+  group_by(Contrast, gene_type, uniprotswissprot) %>%
+  tally() %>%
+  filter() %>%
+  arrange(desc(n)) %>%
+  filter(!is.na(uniprotswissprot))
+
+
+Dups <- Out_New %>%
+  group_by(Contrast, gene_type, ensembl_gene_id) %>%
+  tally() %>%
+  filter() %>%
+  filter(n > 1) %>%
+  ungroup() %>%
+  dplyr::select(ensembl_gene_id) %>%
+  distinct()
+
+annotLookup %>%
+  filter(ensembl_gene_id %in% Dups$ensembl_gene_id)
+
+
+#write.csv(Check, "/scratch/tporter/TB_20231117_Megans_DESeq/Deeda_RNA_Seq_Compiled_Contrast_Results_with_SWISSUNIPROT_RedundancyCheck.csv")
+```
+
+# Read Count Visualizations
+
+```{r}
+library("pheatmap")
+
+select <- order(rowMeans(counts(DeedaRNASeq_Analysis_CASS_outcome, normalized=TRUE)),
+                decreasing=TRUE)[1:25]
+
+df <- as.data.frame(colData(DeedaRNASeq_Analysis_Groups)[,c("Group", "CASS_outcome", "Smear_Group","Gender","Run","HIV_Status")])
+
+df <- as.data.frame(colData(DeedaRNASeq_Analysis_Groups)[,c("Group", "Gender", "CASS_outcome")])
+
+ntd <- normTransform(DeedaRNASeq_Analysis_CASS_outcome)
+
+pheatmap(assay(ntd)[select,], cluster_rows=FALSE, show_rownames=TRUE,
+         cluster_cols=FALSE, annotation_col=df)
+
+vsd <- vst(DeedaRNASeq_Analysis_Groups, blind=FALSE)
+
+pheatmap(assay(ntd)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df)
+
+plotPCA(vsd, intgroup=c("Gene_Count_Group"))
+plotPCA(vsd, intgroup=c("Group", "Gender"))
+plotPCA(vsd, intgroup=c("Run"))
+plotPCA(vsd, intgroup=c("Group"))
+plotPCA(vsd, intgroup=c("Gender"))
+
+plotPCA(ntd, intgroup=c("Gene_Count_Group"))
+plotPCA(ntd, intgroup=c("Group", "Run"))
+plotPCA(ntd, intgroup=c("Run"))
+plotPCA(ntd, intgroup=c("Group"))
+
+```
+
+```{r}
+Plotly <- Out %>%
+  filter(gene_type == "protein_coding") %>%
+  mutate(Contrast_Group = ifelse(grepl("HIV", Contrast), "HIV",
+                                 ifelse(grepl("Gender", Contrast), "Gender",
+                                        ifelse(grepl("Run", Contrast), "Run", "Experimental")))) %>%
+  ggplot(aes(x = gene_name, y = Contrast, fill = log2FoldChange))+
+    geom_tile()+
+    theme_bw()+
+    facet_wrap(~Contrast_Group, scales = "free", ncol = 1)+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+    scale_fill_gradientn(colours = c("blue4", "green4", "orange", "red", "red", "red"))
+
+Plotly
+
+plotly::ggplotly(Plotly)
+
+htmlwidgets::saveWidget(plotly::as_widget(plotly::ggplotly(Plotly, width = 10000, height = 2500)),
+                        file="/scratch/tporter/TB_20231117_Megans_DESeq/Contrast_Figure_Across_Groups.html", selfcontained = TRUE)
+```
+
+# General PCA on all genes
+
+```{r}
+#Create New DeSeq Obhect Using this for reference file:///Users/tporter/Downloads/RNASEQ20_Day3_HandsOn%20(1).pdf
+PCA_Data <- DESeqDataSetFromMatrix(countData = TB_RNA,
+                              colData = Metadata,
+                              design = ~ Group + Run + Gender + HIV_Status)
+
+PCA_Data <- estimateSizeFactors(PCA_Data)
+
+sizeFactors(PCA_Data)
+
+PCA_normalized <- rlog(PCA_Data, blind = T)
+
+plotPCA(PCA_normalized, intgroup=c("Gender")) +
+    theme_bw() +
+    stat_ellipse(level = 0.95) +
+    ggtitle("Gender")+
+    ggsci::scale_color_npg()
+
+plotPCA(PCA_normalized, intgroup=c("Group")) +
+    theme_bw() +
+    stat_ellipse(level = 0.95) +
+    ggtitle("Group")+
+    ggsci::scale_color_npg()
+
+plotPCA(PCA_normalized, intgroup=c("Run")) +
+    theme_bw() +
+    stat_ellipse(level = 0.95) +
+    ggtitle("Run")+
+    ggsci::scale_color_npg()
+
+plotPCA(PCA_normalized, intgroup=c("HIV_Status")) +
+    theme_bw() +
+    stat_ellipse(level = 0.95) +
+    ggtitle("HIV Status")+
+    ggsci::scale_color_npg()
+```
+
+# Group Variable PCA
+```{r}
+Group <- Out_New %>%
+  filter(grepl("Group- Control", Contrast))
+
+Filter <- Group$gene_id
+
+Filter
+
+#Create New DeSeq Obhect Using this for reference file:///Users/tporter/Downloads/RNASEQ20_Day3_HandsOn%20(1).pdf
+PCA_Data <- DESeqDataSetFromMatrix(countData = TB_RNA,
+                              colData = Metadata,
+                              design = ~ Group + Run + Gender + HIV_Status)
+
+PCA_Data <- estimateSizeFactors(PCA_Data)
+
+sizeFactors(PCA_Data)
+
+PCA_normalized <- vst(PCA_Data, blind = T)
+
+# Convert tibble to data frame
+PCA_normalized <- as.data.frame(head(assay(PCA_normalized), nrow(PCA_normalized)))
+
+PCA_normalized$gene <- rownames(PCA_normalized)
+
+PCA_normalized_Filtered <- PCA_normalized %>%
+  filter(gene %in% Filter)
+
+PCA_normalized_Filtered <- PCA_normalized_Filtered %>%
+  pivot_longer(-gene, values_to = "Norm_Count", names_to = "Name") %>%
+  pivot_wider(values_from = Norm_Count, names_from = gene)
+
+PCA <- prcomp(PCA_normalized_Filtered[,-c(1)], center = T, scale = T)
+
+PCA_Table <- data_frame("Name" = PCA_normalized_Filtered$Name, "PC1" = PCA$x[,1], "PC2" = PCA$x[,2])
+
+PCA_Table
+
+names(PCA_Table)
+
+Temp <- right_join(PCA_Table,
+           dplyr::select(Metadata, `Participant ID`, Group, Run, Gender, HIV_Status) %>%
+             pivot_longer(Group:HIV_Status, names_to = "Variable", values_to = "Group"),
+           by = c("Name" = "Participant ID"))
+
+Temp %>%
+  ggplot(aes(x = PC1, y = PC2, col = Group))+
+    geom_point()+
+    stat_ellipse(level = 0.95)+
+    ggsci::scale_color_npg()+
+    theme_bw()+
+    facet_wrap(~Variable)+
+    ggtitle("Principle Component Analysis Across Normalized Read Counts of Significant `Group` Genes PC1: 31.4%, PC2: 9.5%")
+
+Temp %>%
+  filter(Variable == "Group") %>%
+  ggplot(aes(x = PC1, y = PC2, col = Group))+
+    geom_point()+
+    stat_ellipse(level = 0.95)+
+    ggsci::scale_color_npg()+
+    theme_bw()+
+    facet_wrap(~Variable)+
+    ggtitle("Principle Component Analysis Across Normalized Read Counts of Significant `Group` Genes PC1: 31.4%, PC2: 9.5%")
+
+summary(PCA)
+```
+
+# HIV Variable PCA
+```{r}
+Group <- Out_New %>%
+  filter(grepl("Group- HIV", Contrast))
+
+Filter <- Group$gene_id
+
+Filter
+
+#Create New DeSeq Obhect Using this for reference file:///Users/tporter/Downloads/RNASEQ20_Day3_HandsOn%20(1).pdf
+PCA_Data <- DESeqDataSetFromMatrix(countData = TB_RNA,
+                              colData = Metadata,
+                              design = ~ Group + Run + Gender + HIV_Status)
+
+PCA_Data <- estimateSizeFactors(PCA_Data)
+
+sizeFactors(PCA_Data)
+
+PCA_normalized <- vst(PCA_Data, blind = T)
+
+# Convert tibble to data frame
+PCA_normalized <- as.data.frame(head(assay(PCA_normalized), nrow(PCA_normalized)))
+
+PCA_normalized$gene <- rownames(PCA_normalized)
+
+PCA_normalized_Filtered <- PCA_normalized %>%
+  filter(gene %in% Filter)
+
+PCA_normalized_Filtered <- PCA_normalized_Filtered %>%
+  pivot_longer(-gene, values_to = "Norm_Count", names_to = "Name") %>%
+  pivot_wider(values_from = Norm_Count, names_from = gene)
+
+PCA <- prcomp(PCA_normalized_Filtered[,-c(1)], center = T, scale = T)
+
+PCA_Table <- data_frame("Name" = PCA_normalized_Filtered$Name, "PC1" = PCA$x[,1], "PC2" = PCA$x[,2])
+
+PCA_Table
+
+names(PCA_Table)
+
+Temp <- right_join(PCA_Table,
+           dplyr::select(Metadata, `Participant ID`, Group, Run, Gender, HIV_Status) %>%
+             pivot_longer(Group:HIV_Status, names_to = "Variable", values_to = "Group"),
+           by = c("Name" = "Participant ID"))
+
+Temp %>%
+  ggplot(aes(x = PC1, y = PC2, col = Group))+
+    geom_point()+
+    stat_ellipse(level = 0.95)+
+    ggsci::scale_color_npg()+
+    theme_bw()+
+    facet_wrap(~Variable)+
+    ggtitle("Principle Component Analysis Across Normalized Read Counts of Significant HIV Genes PC1: 27%, PC2: 12%")
+
+summary(PCA)
+```
+
+# Gender Variable PCA
+```{r}
+Group <- Out_New %>%
+  filter(grepl("Group- Gender", Contrast))
+
+Filter <- Group$gene_id
+
+Filter
+
+#Create New DeSeq Obhect Using this for reference file:///Users/tporter/Downloads/RNASEQ20_Day3_HandsOn%20(1).pdf
+PCA_Data <- DESeqDataSetFromMatrix(countData = TB_RNA,
+                              colData = Metadata,
+                              design = ~ Group + Run + Gender + HIV_Status)
+
+PCA_Data <- estimateSizeFactors(PCA_Data)
+
+sizeFactors(PCA_Data)
+
+PCA_normalized <- vst(PCA_Data, blind = T)
+
+# Convert tibble to data frame
+PCA_normalized <- as.data.frame(head(assay(PCA_normalized), nrow(PCA_normalized)))
+
+PCA_normalized$gene <- rownames(PCA_normalized)
+
+PCA_normalized_Filtered <- PCA_normalized %>%
+  filter(gene %in% Filter)
+
+PCA_normalized_Filtered <- PCA_normalized_Filtered %>%
+  pivot_longer(-gene, values_to = "Norm_Count", names_to = "Name") %>%
+  pivot_wider(values_from = Norm_Count, names_from = gene)
+
+PCA <- prcomp(PCA_normalized_Filtered[,-c(1)], center = T, scale = T)
+
+PCA_Table <- data_frame("Name" = PCA_normalized_Filtered$Name, "PC1" = PCA$x[,1], "PC2" = PCA$x[,2])
+
+PCA_Table
+
+names(PCA_Table)
+
+Temp <- right_join(PCA_Table,
+           dplyr::select(Metadata, `Participant ID`, Group, Run, Gender, HIV_Status) %>%
+             pivot_longer(Group:HIV_Status, names_to = "Variable", values_to = "Group"),
+           by = c("Name" = "Participant ID"))
+
+Temp %>%
+  ggplot(aes(x = PC1, y = PC2, col = Group))+
+    geom_point()+
+    stat_ellipse(level = 0.95)+
+    ggsci::scale_color_npg()+
+    theme_bw()+
+    facet_wrap(~Variable)+
+    ggtitle("Principle Component Analysis Across Normalized Read Counts of Significant Gender Genes PC1: 58%, PC2: 6%")
+
+summary(PCA)
+```
+
+
+# Run Variable PCA
+```{r}
+Group <- Out_New %>%
+  filter(grepl("Group- Run", Contrast))
+
+Filter <- Group$gene_id
+
+Filter
+
+#Create New DeSeq Obhect Using this for reference file:///Users/tporter/Downloads/RNASEQ20_Day3_HandsOn%20(1).pdf
+PCA_Data <- DESeqDataSetFromMatrix(countData = TB_RNA,
+                              colData = Metadata,
+                              design = ~ Group + Run + Gender + HIV_Status)
+
+PCA_Data <- estimateSizeFactors(PCA_Data)
+
+sizeFactors(PCA_Data)
+
+PCA_normalized <- vst(PCA_Data, blind = T)
+
+# Convert tibble to data frame
+PCA_normalized <- as.data.frame(head(assay(PCA_normalized), nrow(PCA_normalized)))
+
+PCA_normalized$gene <- rownames(PCA_normalized)
+
+PCA_normalized_Filtered <- PCA_normalized %>%
+  filter(gene %in% Filter)
+
+PCA_normalized_Filtered <- PCA_normalized_Filtered %>%
+  pivot_longer(-gene, values_to = "Norm_Count", names_to = "Name") %>%
+  pivot_wider(values_from = Norm_Count, names_from = gene)
+
+PCA <- prcomp(PCA_normalized_Filtered[,-c(1)], center = T, scale = T)
+
+PCA_Table <- data_frame("Name" = PCA_normalized_Filtered$Name, "PC1" = PCA$x[,1], "PC2" = PCA$x[,2])
+
+PCA_Table
+
+names(PCA_Table)
+
+Temp <- right_join(PCA_Table,
+           dplyr::select(Metadata, `Participant ID`, Group, Run, Gender, HIV_Status) %>%
+             pivot_longer(Group:HIV_Status, names_to = "Variable", values_to = "Group"),
+           by = c("Name" = "Participant ID"))
+
+Temp %>%
+  ggplot(aes(x = PC1, y = PC2, col = Group))+
+    geom_point()+
+    stat_ellipse(level = 0.95)+
+    ggsci::scale_color_aaas()+
+    theme_bw()+
+    facet_wrap(~Variable)+
+    ggtitle("Principle Component Analysis Across Normalized Read Counts of Significant Run Genes PC1: 39%, PC2: 12%")
+
+summary(PCA)
+```
+
+# CASS Outcome PCA
+```{r}
+
+unique(Out_New$Contrast)
+
+Group <- Out_New %>%
+  filter(grepl("CASS Outcome- Negative vs. Positive", Contrast))
+
+Filter <- Group$gene_id
+
+Filter
+
+#Create New DeSeq Obhect Using this for reference file:///Users/tporter/Downloads/RNASEQ20_Day3_HandsOn%20(1).pdf
+PCA_Data <- DESeqDataSetFromMatrix(countData = TB_RNA,
+                              colData = Metadata,
+                              design = ~ CASS_outcome + Run + Gender + HIV_Status)
+
+PCA_Data <- estimateSizeFactors(PCA_Data)
+
+sizeFactors(PCA_Data)
+
+PCA_normalized <- vst(PCA_Data, blind = T)
+
+# Convert tibble to data frame
+PCA_normalized <- as.data.frame(head(assay(PCA_normalized), nrow(PCA_normalized)))
+
+PCA_normalized$gene <- rownames(PCA_normalized)
+
+PCA_normalized_Filtered <- PCA_normalized %>%
+  filter(gene %in% Filter)
+
+PCA_normalized_Filtered <- PCA_normalized_Filtered %>%
+  pivot_longer(-gene, values_to = "Norm_Count", names_to = "Name") %>%
+  pivot_wider(values_from = Norm_Count, names_from = gene)
+
+PCA <- prcomp(PCA_normalized_Filtered[,-c(1)], center = T, scale = T)
+
+PCA_Table <- data_frame("Name" = PCA_normalized_Filtered$Name, "PC1" = PCA$x[,1], "PC2" = PCA$x[,2])
+
+PCA_Table
+
+names(PCA_Table)
+
+Temp <- right_join(PCA_Table,
+           dplyr::select(Metadata, `Participant ID`, CASS_outcome, Run, Gender, HIV_Status) %>%
+             pivot_longer(CASS_outcome:HIV_Status, names_to = "Variable", values_to = "Group"),
+           by = c("Name" = "Participant ID"))
+
+Temp %>%
+  ggplot(aes(x = PC1, y = PC2, col = Group))+
+    geom_point()+
+    stat_ellipse(level = 0.95)+
+    ggsci::scale_color_jama()+
+    theme_bw()+
+    facet_wrap(~Variable)+
+    ggtitle("Principle Component Analysis Across Normalized Read Counts of Significant Run Genes PC1: 30%, PC2: 11%")
+
+summary(PCA)
+```
+
+# CASS Smear PCA
+```{r}
+#This creates a DESeq object
+DeedaRNASeq_Culture <- DESeqDataSetFromMatrix(countData = TB_RNA_CASS_SMEAR,
+                              colData = Metadata_CASS_SMEAR,
+                              design = ~ CASS_Culture + Run + Gender + HIV_Status)
+
+
+unique(Out_New$Contrast)
+
+Group <- Out_New %>%
+  filter(grepl("CASS Smear- Negative vs. Positive", Contrast))
+
+Filter <- Group$gene_id
+
+Filter
+
+#Create New DeSeq Obhect Using this for reference file:///Users/tporter/Downloads/RNASEQ20_Day3_HandsOn%20(1).pdf
+PCA_Data <- DESeqDataSetFromMatrix(countData = TB_RNA_CASS_SMEAR,
+                              colData = Metadata_CASS_SMEAR,
+                              design = ~ CASS_Smear + Run + Gender + HIV_Status)
+
+PCA_Data <- estimateSizeFactors(PCA_Data)
+
+sizeFactors(PCA_Data)
+
+PCA_normalized <- vst(PCA_Data, blind = T)
+
+# Convert tibble to data frame
+PCA_normalized <- as.data.frame(head(assay(PCA_normalized), nrow(PCA_normalized)))
+
+PCA_normalized$gene <- rownames(PCA_normalized)
+
+PCA_normalized_Filtered <- PCA_normalized %>%
+  filter(gene %in% Filter)
+
+PCA_normalized_Filtered <- PCA_normalized_Filtered %>%
+  pivot_longer(-gene, values_to = "Norm_Count", names_to = "Name") %>%
+  pivot_wider(values_from = Norm_Count, names_from = gene)
+
+PCA <- prcomp(PCA_normalized_Filtered[,-c(1)], center = T, scale = T)
+
+PCA_Table <- data_frame("Name" = PCA_normalized_Filtered$Name, "PC1" = PCA$x[,1], "PC2" = PCA$x[,2])
+
+PCA_Table
+
+names(PCA_Table)
+
+Temp <- right_join(PCA_Table,
+           dplyr::select(Metadata, `Participant ID`, CASS_Smear, Run, Gender, HIV_Status) %>%
+             pivot_longer(CASS_Smear:HIV_Status, names_to = "Variable", values_to = "Group"),
+           by = c("Name" = "Participant ID"))
+
+Temp %>%
+  ggplot(aes(x = PC1, y = PC2, col = Group))+
+    geom_point()+
+    stat_ellipse(level = 0.95)+
+    ggsci::scale_color_jama()+
+    theme_bw()+
+    facet_wrap(~Variable)+
+    ggtitle("Principle Component Analysis Across Normalized Read Counts of Significant CASS Smear Genes PC1: 32%, PC2: 12%")
+
+summary(PCA)
+```
+
+# CASS Culture PCA
+
+```{r}
+#This creates a DESeq object
+DeedaRNASeq_Culture <- DESeqDataSetFromMatrix(countData = TB_RNA_CASS_SMEAR,
+                              colData = Metadata_CASS_SMEAR,
+                              design = ~ CASS_Culture + Run + Gender + HIV_Status)
+
+
+unique(Out_New$Contrast)
+
+Group <- Out_New %>%
+  filter(grepl("CASS Smear- Negative vs. Positive", Contrast))
+
+Filter <- Group$gene_id
+
+Filter
+
+#Create New DeSeq Obhect Using this for reference file:///Users/tporter/Downloads/RNASEQ20_Day3_HandsOn%20(1).pdf
+PCA_Data <- DESeqDataSetFromMatrix(countData = TB_RNA_CASS_SMEAR,
+                              colData = Metadata_CASS_SMEAR,
+                              design = ~ CASS_Culture + Run + Gender + HIV_Status)
+
+PCA_Data <- estimateSizeFactors(PCA_Data)
+
+sizeFactors(PCA_Data)
+
+PCA_normalized <- vst(PCA_Data, blind = T)
+
+# Convert tibble to data frame
+PCA_normalized <- as.data.frame(head(assay(PCA_normalized), nrow(PCA_normalized)))
+
+PCA_normalized$gene <- rownames(PCA_normalized)
+
+PCA_normalized_Filtered <- PCA_normalized %>%
+  filter(gene %in% Filter)
+
+PCA_normalized_Filtered <- PCA_normalized_Filtered %>%
+  pivot_longer(-gene, values_to = "Norm_Count", names_to = "Name") %>%
+  pivot_wider(values_from = Norm_Count, names_from = gene)
+
+PCA <- prcomp(PCA_normalized_Filtered[,-c(1)], center = T, scale = T)
+
+PCA_Table <- data_frame("Name" = PCA_normalized_Filtered$Name, "PC1" = PCA$x[,1], "PC2" = PCA$x[,2])
+
+PCA_Table
+
+names(PCA_Table)
+
+Temp <- right_join(PCA_Table,
+           dplyr::select(Metadata, `Participant ID`, CASS_Culture, Run, Gender, HIV_Status) %>%
+             pivot_longer(CASS_Culture:HIV_Status, names_to = "Variable", values_to = "Group"),
+           by = c("Name" = "Participant ID"))
+
+Temp %>%
+  ggplot(aes(x = PC1, y = PC2, col = Group))+
+    geom_point()+
+    stat_ellipse(level = 0.95)+
+    ggsci::scale_color_jama()+
+    theme_bw()+
+    facet_wrap(~Variable)+
+    ggtitle("Principle Component Analysis Across Normalized Read Counts of Significant CASS Culture Genes PC1: 32%, PC2: 12%")
+
+summary(PCA)
+```
+
+
+# Functional Analysis Using GAGE
+```{r}
+BiocManager::install("gage")
+BiocManager::install("org.Hs.eg.db")
+BiocManager::install("AnnotationDbi")
+
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+library("gage")
+
+sessionInfo()
+
+
+res <- results(DeedaRNASeq_Analysis_Culture, contrast=c("HIV_Status","Positive", "Negative"), alpha=0.05)
+
+#res$symbol = 
+AnnotationDbi::mapIds(org.Hs.eg.db,
+                     keys=row.names(res), 
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Functional Analysis
+```{r}
+mart <- useMart('ENSEMBL_MART_ENSEMBL')
+mart <- useDataset('hsapiens_gene_ensembl', mart)
+
+mart <- useEnsembl(biomart = "ensembl", 
+                     dataset = "hsapiens_gene_ensembl")
+
+res <- results(DeedaRNASeq_Analysis_CASS_outcome, contrast=c("HIV_Status","Negative", "Positive"), alpha=0.05)
+
+all_genes <- as.character(Out_New$ensembl_gene_id)
+
+genes <- getBM(filters="ensembl_gene_id",
+ attributes=c("ensembl_gene_id", "entrezgene_id"),
+ values= all_genes,
+ mart=mart)
+
+indNA = which(is.na(genes$entrezgene_id))
+genes_noNA <- genes[-indNA,]
+indnodup = which(duplicated(genes_noNA$ entrezgene_id) == F)
+genes_noNA_nodup <- genes_noNA[indnodup,]
+lFC <- res$log2FoldChange[-indNA]
+lFC <- lFC[indnodup]
+names(lFC) <- genes_noNA_nodup$entrezgene_id
+# Sort fold changes in decreasing order
+lFC <- sort(lFC, decreasing = TRUE)
+
+save(lFC, file='/scratch/tporter/TB_20231117_Megans_DESeq/Deeda_RNA_Seq_02.24_lFC.RData')
+```
+
+
+```{r}
+load('/Volumes/scratch/tporter/TB_20231117_Megans_DESeq/Deeda_RNA_Seq_02.24_lFC.RData')
+
+BiocManager::install("clusterProfiler", force = T)
+
+ngseaKEGG <- clusterProfiler::gseKEGG(geneList = lFC,
+ organism = "hsa",
+ nPerm = 1000, # default number permutations
+ minGSSize = 5, # minimum gene set size
+ pvalueCutoff = 0.1, # padj cutoff value
+ verbose = FALSE)
+# Extract the GSEA results
+gseaKEGG_results <- gseaKEGG@result
+
+
+??clusterProfiler::gseKEGG
+```
+
+Group <- data_frame(TB_RNA_DF) %>%
+  filter(Gene %in% Filter)
+
+Group_Wide <- Group %>%
+  dplyr::select(Gene, Name, Gender, Reads) %>%
+  pivot_wider(values_from = Reads, names_from = Gene)
+
+Group_Wide[,-c(1:2)]
+
+PCA <- prcomp(Group_Wide[,-c(1:2)], center = T, scale = T)
+
+summary(PCA)
+
+Temp <- cbind(Group_Wide[,c(1:2)], PCA$x) 
+
+Plotly <- Temp %>%
+  ggplot(aes(x = PC1, y = PC2, col = Gender, group = Name))+
+    geom_point()+
+    ggsci::scale_color_nejm()+
+    theme_bw()+
+    ggtitle("PCA of significant genes within the Gender contrast")
+
+plotly::ggplotly(Plotly)
+
+htmlwidgets::saveWidget(plotly::as_widget(plotly::ggplotly(Plotly, width = 1200, height = 800)),
+                        file="/scratch/tporter/TB_20231117_Megans_DESeq/PCA_Gender.html", selfcontained = TRUE)
+
+
+library(ggbiplot)
+ggbiplot(PCA,
+              obs.scale = 1,
+              var.scale = 1,
+              groups = Temp$Gender,
+              ellipse = TRUE,
+              circle = TRUE,
+              ellipse.prob = 0.68,
+              var.axes = F)+
+  scale_color_discrete(name = '')+
+  theme(legend.direction = 'horizontal',
+               legend.position = 'top')+
+  theme_bw()+
+  ggsci::scale_color_nejm()+
+  ggtitle("PCA of significant genes within the HIV contrast")
