@@ -17,6 +17,17 @@ library(tidyverse)
 library(DESeq2)
 ```
 
+```{r}
+require(usethis)
+edit_r_environ()
+
+OPENAI_API_KEY="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"
+
+library(gptstudio)
+```
+
+
+
 # Basic Manipulation of the Data
 Import the count table (sequencing data), metadata, pair them and create a DESeq object.
 
@@ -34,7 +45,10 @@ Temp <- TB_RNA_DF %>%
   separate(Gene, into = c("ensembl_gene_id", "dot"), sep = "\\.") %>%
   group_by(ensembl_gene_id, Name) %>%
   summarise(Reads_total = sum(Reads))
-Temp <- semi_join(Temp, data.frame(ensembl_gene_id =keys(org.Hs.eg.db,keytype="ENSEMBL")))
+
+library("org.Hs.eg.db")
+Temp <- semi_join(Temp, data.frame(ensembl_gene_id = AnnotationDbi::keys(org.Hs.eg.db,keytype="ENSEMBL")))
+
 Temp <- Temp %>%
   pivot_wider(values_from = Reads_total, names_from = Name)
 TB_RNA <- as.matrix(Temp %>%
@@ -216,76 +230,127 @@ resultsNames(DeedaRNASeq_Analysis_Culture)
 DeedaRNASeq_Analysis_Culture@design
 ```
 
-# Functional Analysis Using GAGE
+# Functional Analysis Using GAGE wrapper
 ```{r}
-# BiocManager::install("gage")
-# BiocManager::install("org.Hs.eg.db")
-# BiocManager::install("AnnotationDbi")
-# BiocManager::install("gageData")
-# BiocManager::install("pathview")
-
 library("AnnotationDbi")
 library("org.Hs.eg.db")
-library("gage")
-
-sessionInfo()
-
-columns(org.Hs.eg.db)
-
-res <- results(DeedaRNASeq_Analysis_Groups, contrast=c("Group","CASES","CONTROL_2"), alpha=0.05)
-res = res[order(res$pvalue),]
-summary(res)
-
-res
-
-keys(org.Hs.eg.db,keytype="ENSEMBL")
-
-res$symbol = mapIds(org.Hs.eg.db,
-                     keys=row.names(res), 
-                     column="SYMBOL",
-                     keytype="ENSEMBL",
-                     multiVals="first")
-
-res$entrez = mapIds(org.Hs.eg.db,
-                     keys=row.names(res), 
-                     column="ENTREZID",
-                     keytype="ENSEMBL",
-                     multiVals="first")
-
-res$name =   mapIds(org.Hs.eg.db,
-                     keys=row.names(res), 
-                     column="GENENAME",
-                     keytype="ENSEMBL",
-                     multiVals="first")
-head(res, 10)
-```
-
-```{r}
-library(pathview)
 library(gage)
 library(gageData)
 data(kegg.sets.hs)
 data(sigmet.idx.hs)
-kegg.sets.hs = kegg.sets.hs[sigmet.idx.hs]
-head(kegg.sets.hs, 3)
 
+# Load required libraries
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+library(gage)
+library(gageData)
 
-foldchanges = res$log2FoldChange
-names(foldchanges) = res$entrez
-head(foldchanges)
+# Load KEGG gene sets and indices
+data(kegg.sets.hs)
+data(sigmet.idx.hs)
 
-# Get the results
-keggres = gage(foldchanges, gsets=kegg.sets.hs, same.dir=TRUE)
+# Define a function for GAGE functional analysis
+gage_functional_analysis_wrapper <- function(db, contrast, p.val_cutoff) {
+  # Perform differential expression analysis using AnnotationDbi
+  res <- results(db, contrast = contrast, alpha = 0.05)
+  
+  # Order the results by p-value
+  res <- res[order(res$pvalue),]
+  
+  # Map ENSEMBL IDs to gene symbols, entrez IDs, and gene names
+  res$symbol <- mapIds(org.Hs.eg.db,
+                       keys = row.names(res), 
+                       column = "SYMBOL",
+                       keytype = "ENSEMBL",
+                       multiVals = "first")
+  res$entrez <- mapIds(org.Hs.eg.db,
+                       keys = row.names(res), 
+                       column = "ENTREZID",
+                       keytype = "ENSEMBL",
+                       multiVals = "first")
+  res$name <- mapIds(org.Hs.eg.db,
+                     keys = row.names(res), 
+                     column = "GENENAME",
+                     keytype = "ENSEMBL",
+                     multiVals = "first")
+  
+  # Filter KEGG gene sets based on the provided indices
+  kegg.sets.hs <- kegg.sets.hs[sigmet.idx.hs]
+  data(kegg.sets.hs)
+  data(sigmet.idx.hs)
+  
+  # Extract fold changes and assign gene names
+  foldchanges <- res$log2FoldChange
+  names(foldchanges) <- res$entrez
+  
+  # Perform GAGE analysis using fold changes and KEGG gene sets
+  keggres <- gage(foldchanges, gsets = kegg.sets.hs, same.dir = TRUE)
+  
+  # Combine results for greater and less directions, filter based on p-value cutoff
+  Temp <- rbind(data.frame(keggres$greater, "Direction" = "greater"), 
+                data.frame(keggres$less, "Direction" = "less")) %>%
+    filter(p.val < p)
+  
+  return(Temp)
+}
 
-keggres
-
-# Look at both up (greater), down (less), and statatistics.
-lapply(keggres, head)
-
-keggres$greater
-
-keggres$less
-
-keggres$stats
 ```
+
+# Conduct functional analyses
+```{r}
+  
+functional_analysis <- rbind(
+  #Group Contrasts
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Groups, contrast = c("Group", "CASES", "CONTROL_2"), p.val_cutoff=0.1), "Contrast" = "Group- Control_2 vs. Cases"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Groups, contrast = c("Group", "CASES", "CONTROL_1"), p.val_cutoff=0.1), "Contrast" = "Group- Control_1 vs. Cases"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Groups, contrast = c("Group", "CONTROL_2", "CONTROL_1"), p.val_cutoff=0.1), "Contrast" = "Group- Control_1 vs. Control_2"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Groups, contrast = c("HIV_Status", "Positive", "Negative"), p.val_cutoff=0.1), "Contrast" = "Group- HIV Negative vs. Positive"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Groups, contrast = c("Run", "2", "1"), p.val_cutoff=0.1), "Contrast" = "Group- Run 1 vs. 2"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Groups, contrast = c("Gender", "Female", "Male"), p.val_cutoff=0.1), "Contrast" = "Group- Male vs. Female"),
+  #CASS_Culture
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Culture, contrast = c("CASS_Culture", "Positive", "Negative"), p.val_cutoff=0.1), "Contrast" = "CASS Culture- Negative vs. Positive"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Culture, contrast = c("HIV_Status", "Positive", "Negative"), p.val_cutoff=0.1), "Contrast" = "CASS Culture- HIV Negative vs. Positive"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Culture, contrast = c("Run", "2", "1"), p.val_cutoff=0.1), "Contrast" = "CASS Culture- Run 1 vs. 2"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Culture, contrast = c("Gender", "Female", "Male"), p.val_cutoff=0.1), "Contrast" = "CASS Culture- Male vs. Female"),
+  #CASS_Outcome
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_CASS_outcome, contrast = c("CASS_outcome", "Positive", "Negative"), p.val_cutoff=0.1), "Contrast" = "CASS Outcome- Negative vs. Positive"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_CASS_outcome, contrast = c("HIV_Status", "Positive", "Negative"), p.val_cutoff=0.1), "Contrast" = "CASS Outcome- HIV Negative vs. Positive"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_CASS_outcome, contrast = c("Run", "2", "1"), p.val_cutoff=0.1), "Contrast" = "CASS Outcome- Run 1 vs. 2"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_CASS_outcome, contrast = c("Gender", "Female", "Male"), p.val_cutoff=0.1), "Contrast" = "CASS Outcome- Male vs. Female"),
+  #CASS_Smear
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Smear, contrast = c("CASS_Smear", "Positive", "Negative"), p.val_cutoff=0.1), "Contrast" = "CASS Smear- Negative vs. Positive"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Smear, contrast = c("HIV_Status", "Positive", "Negative"), p.val_cutoff=0.1), "Contrast" = "CASS Smear- HIV Negative vs. Positive"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Smear, contrast = c("Run", "2", "1"), p.val_cutoff=0.1), "Contrast" = "CASS Smear- Run 1 vs. 2"),
+  cbind(gage_functional_analysis_wrapper(db = DeedaRNASeq_Analysis_Smear, contrast = c("Gender", "Female", "Male"), p.val_cutoff=0.1), "Contrast" = "CASS Smear- Male vs. Female")
+)
+
+write.csv(functional_analysis, "/scratch/tporter/TB_20231117_Megans_DESeq/Data_All_Transcripts_No_Filter/All_Transcripts_No_Filter_Functional_GAGE_Analysis.csv")
+```
+
+
+
+
+
+CASS Culture- HIV Positive vs. Negative
+CASS Culture- Gender Male vs. Female
+CASS Culture- Negative vs. Positive
+CASS Culture- Run 1 vs. 2
+
+CASS Outcome- Gender Male vs. Female
+CASS Outcome- HIV Positive vs. Negative
+CASS Outcome- Run 1 vs. 2
+CASS Outcome- Negative vs. Positive
+
+CASS Smear- Negative vs. Positive
+CASS Smear- Run 1 vs. 2
+CASS Smear- HIV Positive vs. Negative
+CASS Smear- Gender Male vs. Female
+
+
+
+# Session Info
+```{r}
+sessionInfo()
+```
+
 
